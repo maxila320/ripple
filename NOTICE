@@ -1,0 +1,10 @@
+RIPPLE
+Copyright 2026 The RIPPLE authors
+
+This product includes software derived from hnswlib
+(https://github.com/nmslib/hnswlib), licensed under the Apache License 2.0.
+Copyright of the original hnswlib code belongs to its authors.
+
+The construction and storage of per-node attribute vectors is adapted from the
+RWalks implementation (Ait Aomar et al., Proc. ACM Manag. Data 3(3), 2025).
+Copyright of the original RWalks code belongs to its authors.

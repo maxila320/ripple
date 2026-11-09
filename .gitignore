@@ -1,0 +1,7 @@
+src/build/
+src/tmp/
+src/*.so
+src/*.egg-info/
+__pycache__/
+tests/out/
+incoming/

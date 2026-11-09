@@ -1,0 +1,10 @@
+Equivalence check: original RWalks tree (mode 9) vs separated RIPPLE library, top-10 ids per query
+date: 2026年 11月 09日 星期一 12:05:29 CST
+== sift1m_rwalks/single_0.1-0.1
+labels_c0.98.npy identical
+labels_c1.06.npy identical
+labels_c1.20.npy identical
+== arxiv_medium_em/single_0.01-1
+labels_c0.98.npy identical
+labels_c1.06.npy identical
+labels_c1.20.npy identical
