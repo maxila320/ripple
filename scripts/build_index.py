@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build the graph index searched by RIPPLE: HNSW (M = 32, efConstruction = 200) whose nodes store
-the attribute encodings and the RWalks attribute aggregates (random walks inside add_items).
+the attribute encodings and the attribute aggregates (random walks inside add_items).
 
     python3 scripts/build_index.py --tree src --ds-dir <ds-dir> --out <dir>/index.bin --threads 30
 
