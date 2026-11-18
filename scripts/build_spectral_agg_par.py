@@ -5,18 +5,21 @@ Every node is computed by node_spectral() of build_spectral_agg.py; only the loo
 split across processes. Two random-number modes:
 
   --rng-mode stream   (default) bit-identical to the sequential build_spectral_agg.py.
-                      build_spectral_agg.py uses ONE generator for all nodes in order, so a cheap
-                      sequential pre-pass replays only the random walks (no eigendecomposition)
-                      and records the generator state at the start of every chunk; each worker
-                      restores that state and continues exactly as the sequential loop would.
+                      build_spectral_agg.py uses ONE generator for all nodes in order, so a
+                      sequential pre-pass replays only the random draws of the walks (no
+                      eigendecomposition) and records the generator state at the start of every
+                      chunk; each worker restores that state and continues exactly as the
+                      sequential loop would. The pre-pass runs in a small C kernel
+                      (fast_prepass.py, compiled with cc on first use); --prepass python uses the
+                      pure-Python replay instead (same states, much slower).
   --rng-mode pernode  generator seeded by (seed, node): no pre-pass, result independent of the
                       number of processes, but NOT bit-identical to tables built sequentially.
 
 Same arguments and output file names as build_spectral_agg.py, plus --procs, --chunk,
 --rng-mode, --verify-against (compare random rows with an existing table).
 
-    taskset -c 16-239 nice -n 19 python3 build_spectral_agg_par.py --procs 64 \
-        --dataset sift1m_rwalks --ds-dir ... --index ... --tree ... --out-root ... \
+    python3 scripts/build_spectral_agg_par.py --procs 30 \
+        --dataset sift1m_rwalks --ds-dir ... --index ... --tree src --out-root ... \
         --W 32 --m-max 64 --rank 4 --variant skip_const --seed 100 --rng-mode stream
 """
 from __future__ import annotations
@@ -39,6 +42,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fast_prepass  # noqa: E402  (same folder)
 G = {}                                       # shared with forked workers (copy-on-write)
 
 
@@ -99,6 +103,10 @@ def main():
     ap.add_argument("--rng-mode", choices=("stream", "pernode"), default="stream")
     ap.add_argument("--verify-against", default=None)
     ap.add_argument("--verify-rows", type=int, default=10000)
+    ap.add_argument("--prepass", choices=("fast", "python"), default="fast",
+                    help="how to compute the per-chunk generator states for --rng-mode stream (same result)")
+    ap.add_argument("--check-prepass", type=int, default=0,
+                    help="compare the first K chunk states with the Python replay (not timed; 0 = off)")
     args = ap.parse_args()
 
     mod = importlib.import_module("build_spectral_agg")
@@ -131,16 +139,34 @@ def main():
     bounds = list(range(0, limit, chunk)) + [limit]
     tasks = []
     tp = time.time()
-    if args.rng_mode == "stream":             # sequential pre-pass: generator state per chunk start
+    check = None
+    if args.rng_mode == "stream" and args.prepass == "fast":
+        # generator state per chunk start, computed by a C kernel (fast_prepass.py); identical to the
+        # sequential Python replay below
+        states = fast_prepass.chunk_states(sip, six, bounds, args.W, args.m_max, args.seed)
+        tasks = [(bounds[k], bounds[k + 1], states[k]) for k in range(len(bounds) - 1)]
+        prepass_sec = time.time() - tp
+        if args.check_prepass > 0:             # optional: compare with the Python replay on a prefix
+            kchk = min(args.check_prepass, len(states))
+            ref = fast_prepass.python_states(sip, six, bounds, args.W, args.m_max, args.seed, walk_draws,
+                                             n_chunks=kchk)
+            check = dict(chunks=kchk, identical=bool(all(fast_prepass.same_state(a, b)
+                                                         for a, b in zip(ref, states[:kchk]))))
+            print(json.dumps({"check_prepass": check}), flush=True)
+            if not check["identical"]:
+                raise SystemExit("fast pre-pass differs from the Python pre-pass; rerun with --prepass python")
+    elif args.rng_mode == "stream":           # sequential Python pre-pass: generator state per chunk start
         rng = np.random.default_rng(args.seed)
         for k in range(len(bounds) - 1):
             tasks.append((bounds[k], bounds[k + 1], copy.deepcopy(rng.bit_generator.state)))
             for node in range(bounds[k], bounds[k + 1]):
                 walk_draws(node, sip, six, args.W, args.m_max, rng)
+        prepass_sec = time.time() - tp
     else:
         tasks = [(bounds[k], bounds[k + 1], None) for k in range(len(bounds) - 1)]
-    prepass_sec = time.time() - tp
-    print(json.dumps({"prepass_seconds": prepass_sec, "tasks": len(tasks), "chunk": chunk}), flush=True)
+        prepass_sec = time.time() - tp
+    print(json.dumps({"prepass_seconds": prepass_sec, "prepass": args.prepass, "tasks": len(tasks),
+                      "chunk": chunk}), flush=True)
 
     G.update(mod=mod, X=X, sip=sip, six=six, labels=labels, lab_ip=lab_ip, lab_ix=lab_ix,
              n_labels=n_labels, W=args.W, m_max=args.m_max, rank=args.rank, variant=args.variant,
@@ -174,6 +200,7 @@ def main():
         "parallel": {"procs": int(args.procs), "chunk": int(chunk), "rng_mode": args.rng_mode,
                      "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None},
         "symmetrize_seconds": float(graph_sec), "prepass_seconds": float(prepass_sec),
+        "prepass": args.prepass, "check_prepass": check,
         "loop_seconds": float(loop_sec), "wall_seconds": float(time.time() - t0),
         "seconds_per_1e5_rows": float(loop_sec / max(1, limit) * 1e5),
         "peak_rss_bytes_parent": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024,
@@ -181,7 +208,8 @@ def main():
     }
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"raw": str(raw), "meta": str(meta_path), "wall_seconds": meta["wall_seconds"],
-                      "loop_seconds": loop_sec, "prepass_seconds": prepass_sec, "procs": args.procs}))
+                      "loop_seconds": loop_sec, "prepass_seconds": prepass_sec, "symmetrize_seconds": graph_sec,
+                      "procs": args.procs}))
 
 
 if __name__ == "__main__":
